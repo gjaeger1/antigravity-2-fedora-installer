@@ -26,13 +26,7 @@ NC='\033[0m' # No Color
 # Default values
 INSTALL_SCOPE="system"
 APP_MODE="" # Starts empty to force interaction if not provided
-
-VERSION_IDE="2.0.3"
-VERSION_AGENT="2.0.10"
 APP_VERSION=""
-
-DOWNLOAD_URL_IDE="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/2.0.4-6381998290370560/linux-x64/Antigravity%20IDE.tar.gz"
-DOWNLOAD_URL_AGENT="https://storage.googleapis.com/antigravity-public/antigravity-hub/2.0.11-6560309696135168/linux-x64/Antigravity.tar.gz"
 
 DRY_RUN=false
 TEMP_DIR=""
@@ -51,6 +45,73 @@ escalate_cmd() {
     else
         "$@"
     fi
+}
+
+extract_latest_version() {
+    local product_id="$1"
+    local releases_html
+    local version
+
+    echo -e "${YELLOW}Detecting latest ${product_id} release version...${NC}" >&2
+
+    if ! releases_html=$(curl -fsSL "https://antigravity.google/releases?hl=en&id=${product_id}"); then
+        echo -e "${RED}Error: Failed to fetch release metadata for ${product_id}.${NC}" >&2
+        exit 1
+    fi
+
+    version=$(printf '%s' "$releases_html" | grep -oE 'Version[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 | awk '{print $2}')
+
+    if [[ -z "$version" ]]; then
+        echo -e "${RED}Error: Unable to detect latest version for ${product_id}.${NC}" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$version"
+}
+
+build_release_url() {
+    local mode="$1"
+    local version="$2"
+    local arch="$3"
+
+    case "$mode" in
+        ide)
+            printf 'https://storage.googleapis.com/antigravity-public/antigravity-ide/%s/%s/Antigravity%%20IDE.tar.gz\n' "$version" "$arch"
+            ;;
+        agent)
+            printf 'https://storage.googleapis.com/antigravity-public/antigravity-hub/%s/%s/Antigravity.tar.gz\n' "$version" "$arch"
+            ;;
+        *)
+            echo -e "${RED}Error: Unsupported mode '$mode' for release URL generation.${NC}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+resolve_release_metadata() {
+    local mode="$1"
+    local arch="$2"
+    local product_id
+    local version
+    local url
+
+    case "$mode" in
+        ide)
+            product_id="AntigravityIDE"
+            ;;
+        agent)
+            product_id="GoogleAntigravity"
+            ;;
+        *)
+            echo -e "${RED}Error: Unsupported mode '$mode' for release lookup.${NC}" >&2
+            exit 1
+            ;;
+    esac
+
+    version=$(extract_latest_version "$product_id")
+    url=$(build_release_url "$mode" "$version" "$arch")
+
+    printf '%s|%s\n' "$version" "$url"
 }
 
 # Print usage instructions
@@ -150,14 +211,24 @@ if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
 fi
 
 # Dynamic URL Selection based on architecture
+IDE_DOWNLOAD_ARCH="linux-x64"
+AGENT_DOWNLOAD_ARCH="linux-x64"
 if [[ "$ARCH" == "aarch64" ]]; then
-    DOWNLOAD_URL_AGENT="https://storage.googleapis.com/antigravity-public/antigravity-hub/2.0.10-5119448496078848/linux-arm/Antigravity.tar.gz"
+    AGENT_DOWNLOAD_ARCH="linux-arm"
     if [[ "$APP_MODE" == "ide" ]]; then
         echo -e "${YELLOW}Warning: Native ARM64 build is not officially supported for the IDE variant.${NC}" >&2
         echo -e "${YELLOW}Defaulting to the standard x86_64 package (requires compatibility layers).${NC}" >&2
     fi
+fi
+
+if [[ -z "$DOWNLOAD_URL" ]]; then
+    if [[ "$APP_MODE" == "ide" ]]; then
+        IFS='|' read -r APP_VERSION DOWNLOAD_URL <<< "$(resolve_release_metadata "ide" "$IDE_DOWNLOAD_ARCH")"
+    else
+        IFS='|' read -r APP_VERSION DOWNLOAD_URL <<< "$(resolve_release_metadata "agent" "$AGENT_DOWNLOAD_ARCH")"
+    fi
 else
-    DOWNLOAD_URL_AGENT="https://storage.googleapis.com/antigravity-public/antigravity-hub/2.0.10-5119448496078848/linux-x64/Antigravity.tar.gz"
+    APP_VERSION="dynamic"
 fi
 
 # Define dynamic variables based on selected mode
@@ -166,19 +237,17 @@ if [[ "$APP_MODE" == "ide" ]]; then
     APP_NAME_PRETTY="Antigravity 2.0 IDE"
     APP_COMMENT="Experience liftoff (v2.0 Standalone IDE)"
     BINARY_NAME="antigravity-ide"
-    APP_VERSION="$VERSION_IDE"
-    [[ -z "$DOWNLOAD_URL" ]] && DOWNLOAD_URL="$DOWNLOAD_URL_IDE"
 else
     APP_NAME_SHORT="antigravity"
     APP_NAME_PRETTY="Antigravity 2.0 Agent"
     APP_COMMENT="Experience liftoff (v2.0 Agent)"
     BINARY_NAME="antigravity"
-    APP_VERSION="$VERSION_AGENT"
-    [[ -z "$DOWNLOAD_URL" ]] && DOWNLOAD_URL="$DOWNLOAD_URL_AGENT"
 fi
 
 echo -e "\n${BLUE}Selected variant: ${BOLD}${APP_NAME_PRETTY}${NC}"
 echo -e "${BLUE}Targeting scope: ${BOLD}${INSTALL_SCOPE}${NC}"
+echo -e "${BLUE}Resolved version: ${BOLD}${APP_VERSION}${NC}"
+echo -e "${BLUE}Resolved download URL: ${BOLD}${DOWNLOAD_URL}${NC}"
 
 # Define paths based on install scope and dynamic name
 if [[ "$INSTALL_SCOPE" == "system" ]]; then
@@ -238,7 +307,7 @@ fi
 
 # Pre-flight check: Required utilities
 echo -e "${YELLOW}Verifying system utilities...${NC}"
-for util in curl tar sed update-desktop-database df awk; do
+for util in curl tar sed update-desktop-database df awk grep head; do
     if ! command -v "$util" &> /dev/null; then
         echo -e "${RED}Error: Required command '$util' is missing.${NC}" >&2
         exit 1
@@ -325,7 +394,6 @@ if [[ "$DRY_RUN" == "true" ]]; then
     echo -e "${GREEN}✓ Dry-run completed successfully. The environment and download were verified.${NC}"
     exit 0
 fi
-
 
 
 echo -e "${YELLOW}Extracting and installing binaries...${NC}"
@@ -537,4 +605,3 @@ if [[ "$INSTALL_SCOPE" == "user" ]]; then
         echo -e "  ${BLUE}echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ${CONFIG_FILE} && source ${CONFIG_FILE}${NC}"
     fi
 fi
-
