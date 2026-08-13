@@ -47,71 +47,97 @@ escalate_cmd() {
     fi
 }
 
-extract_latest_version() {
-    local product_id="$1"
-    local releases_html
-    local version
-
-    echo -e "${YELLOW}Detecting latest ${product_id} release version...${NC}" >&2
-
-    if ! releases_html=$(curl -fsSL "https://antigravity.google/releases?hl=en&id=${product_id}"); then
-        echo -e "${RED}Error: Failed to fetch release metadata for ${product_id}.${NC}" >&2
-        exit 1
-    fi
-
-    version=$(printf '%s' "$releases_html" | grep -oE 'Version[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 | awk '{print $2}')
-
-    if [[ -z "$version" ]]; then
-        echo -e "${RED}Error: Unable to detect latest version for ${product_id}.${NC}" >&2
-        exit 1
-    fi
-
-    printf '%s\n' "$version"
-}
-
-build_release_url() {
-    local mode="$1"
-    local version="$2"
-    local arch="$3"
-
-    case "$mode" in
-        ide)
-            printf 'https://storage.googleapis.com/antigravity-public/antigravity-ide/%s/%s/Antigravity%%20IDE.tar.gz\n' "$version" "$arch"
-            ;;
-        agent)
-            printf 'https://storage.googleapis.com/antigravity-public/antigravity-hub/%s/%s/Antigravity.tar.gz\n' "$version" "$arch"
-            ;;
-        *)
-            echo -e "${RED}Error: Unsupported mode '$mode' for release URL generation.${NC}" >&2
-            exit 1
-            ;;
-    esac
-}
-
 resolve_release_metadata() {
     local mode="$1"
     local arch="$2"
-    local product_id
-    local version
-    local url
+    local api_url=""
+    local version=""
+    local exec_id=""
+    local download_url=""
+    local json_data=""
 
-    case "$mode" in
-        ide)
-            product_id="AntigravityIDE"
-            ;;
-        agent)
-            product_id="GoogleAntigravity"
-            ;;
-        *)
-            echo -e "${RED}Error: Unsupported mode '$mode' for release lookup.${NC}" >&2
-            exit 1
-            ;;
-    esac
+    echo -e "${YELLOW}Detecting latest version and download URL from release metadata...${NC}" >&2
 
-    version=$(extract_latest_version "$product_id")
-    url=$(build_release_url "$mode" "$version" "$arch")
+    # Primary API endpoints based on mode
+    if [[ "$mode" == "ide" ]]; then
+        api_url="https://antigravity-ide-auto-updater-974169037036.us-central1.run.app/releases"
+    elif [[ "$mode" == "agent" ]]; then
+        api_url="https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/releases"
+    else
+        echo -e "${RED}Error: Unsupported mode '$mode' for release metadata resolution.${NC}" >&2
+        return 1
+    fi
 
-    printf '%s|%s\n' "$version" "$url"
+    # Attempt 1: Fetch primary auto-updater API JSON directly
+    json_data=$(curl -fsSL --compressed "$api_url" 2>/dev/null || true)
+
+    # Attempt 2: Discover API endpoint dynamically from antigravity.google release JS bundles
+    if [[ -z "$json_data" ]]; then
+        local js_paths
+        js_paths=$(curl -fsSL --compressed "https://antigravity.google/releases" 2>/dev/null | grep -oE "/_astro/[^\"]+\.js" || true)
+        for js_path in $js_paths; do
+            local js_content
+            js_content=$(curl -fsSL --compressed "https://antigravity.google${js_path}" 2>/dev/null || true)
+            local fetched_api=""
+            if [[ "$mode" == "ide" ]]; then
+                fetched_api=$(echo "$js_content" | grep -oE "https://[a-zA-Z0-9_.-]+ide[a-zA-Z0-9_.-]*\.run\.app/releases" | head -n 1 || true)
+            else
+                fetched_api=$(echo "$js_content" | grep -oE "https://[a-zA-Z0-9_.-]+hub[a-zA-Z0-9_.-]*\.run\.app/releases" | head -n 1 || true)
+            fi
+            if [[ -n "$fetched_api" ]]; then
+                json_data=$(curl -fsSL --compressed "$fetched_api" 2>/dev/null || true)
+                [[ -n "$json_data" ]] && break
+            fi
+        done
+    fi
+
+    # Extract latest version and execution_id from JSON response
+    if [[ -n "$json_data" ]]; then
+        local matched_pair
+        matched_pair=$(echo "$json_data" | grep -oE "\"version\":\"[^\"]*\",\"execution_id\":\"[^\"]*\"" | head -n 1 | sed -nE "s/.*\"version\":\"([^\"]*)\".*\"execution_id\":\"([^\"]*)\".*/\1 \2/p" || true)
+        if [[ -n "$matched_pair" ]]; then
+            version=$(echo "$matched_pair" | awk '{print $1}')
+            exec_id=$(echo "$matched_pair" | awk '{print $2}')
+            exec_id="${exec_id%/}"
+        fi
+    fi
+
+    # Attempt 3: Parse fallback attributes from HTML of releases page if API calls failed
+    if [[ -z "$version" || -z "$exec_id" ]]; then
+        local html_content
+        html_content=$(curl -fsSL --compressed "https://antigravity.google/releases" 2>/dev/null || true)
+        if [[ -n "$html_content" ]]; then
+            local fallback_attr=""
+            if [[ "$mode" == "ide" ]]; then
+                fallback_attr="data-fallback-ide"
+            else
+                fallback_attr="data-fallback-antigravity"
+            fi
+            local matched_pair
+            matched_pair=$(echo "$html_content" | grep -oE "${fallback_attr}=\"[^\"]+\"" | sed 's/&quot;/"/g' | grep -oE "\"version\":\"[^\"]*\",\"execution_id\":\"[^\"]*\"" | head -n 1 | sed -nE "s/.*\"version\":\"([^\"]*)\".*\"execution_id\":\"([^\"]*)\".*/\1 \2/p" || true)
+            if [[ -n "$matched_pair" ]]; then
+                version=$(echo "$matched_pair" | awk '{print $1}')
+                exec_id=$(echo "$matched_pair" | awk '{print $2}')
+                exec_id="${exec_id%/}"
+            fi
+        fi
+    fi
+
+    # Construct the download URL if version and execution_id were found
+    if [[ -n "$version" && -n "$exec_id" ]]; then
+        if [[ "$mode" == "ide" ]]; then
+            download_url="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${exec_id}/${arch}/Antigravity%20IDE.tar.gz"
+        else
+            download_url="https://storage.googleapis.com/antigravity-public/antigravity-hub/${version}-${exec_id}/${arch}/Antigravity.tar.gz"
+        fi
+    fi
+
+    if [[ -z "$version" || -z "$download_url" ]]; then
+        echo -e "${RED}Error: Failed to resolve release metadata for $mode ($arch).${NC}" >&2
+        return 1
+    fi
+
+    printf '%s|%s\n' "$version" "$download_url"
 }
 
 # Print usage instructions
@@ -222,13 +248,20 @@ if [[ "$ARCH" == "aarch64" ]]; then
 fi
 
 if [[ -z "$DOWNLOAD_URL" ]]; then
+    RESOLVED_META=""
     if [[ "$APP_MODE" == "ide" ]]; then
-        IFS='|' read -r APP_VERSION DOWNLOAD_URL <<< "$(resolve_release_metadata "ide" "$IDE_DOWNLOAD_ARCH")"
+        RESOLVED_META=$(resolve_release_metadata "ide" "$IDE_DOWNLOAD_ARCH") || exit 1
     else
-        IFS='|' read -r APP_VERSION DOWNLOAD_URL <<< "$(resolve_release_metadata "agent" "$AGENT_DOWNLOAD_ARCH")"
+        RESOLVED_META=$(resolve_release_metadata "agent" "$AGENT_DOWNLOAD_ARCH") || exit 1
     fi
+    IFS='|' read -r APP_VERSION DOWNLOAD_URL <<< "$RESOLVED_META"
 else
     APP_VERSION="dynamic"
+fi
+
+if [[ -z "$APP_VERSION" || -z "$DOWNLOAD_URL" ]]; then
+    echo -e "${RED}Error: Release version or download URL resolution failed.${NC}" >&2
+    exit 1
 fi
 
 # Define dynamic variables based on selected mode

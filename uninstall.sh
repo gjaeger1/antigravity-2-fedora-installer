@@ -139,6 +139,15 @@ if [ "$INSTALL_SCOPE" != "user" ]; then
         safe_remove "/usr/local/bin/antigravity-ide" "true"
         safe_remove "$SYSTEM_DESKTOP_DIR/antigravity-ide.desktop" "true"
         safe_remove "$SYSTEM_DESKTOP_DIR/antigravity-ide-legacy.desktop" "true"
+        safe_remove "$SYSTEM_DESKTOP_DIR/antigravity-ide-2.desktop" "true"
+    fi
+
+    # Clean up system-wide icon if no version of Antigravity remains installed
+    if [ ! -d "/opt/antigravity-Linux" ] && \
+       [ ! -d "/opt/Antigravity-Linux" ] && \
+       [ ! -d "/opt/Antigravity-x64" ] && \
+       [ ! -d "/opt/antigravity-ide-Linux" ]; then
+        safe_remove "/usr/share/pixmaps/antigravity.png" "true"
     fi
 
     # Refresh system-wide desktop database if needed
@@ -166,6 +175,15 @@ if [ "$REMOVE_IDE" = "true" ]; then
     safe_remove "$HOME/.local/bin/antigravity-ide" "false"
     safe_remove "$USER_DESKTOP_DIR/antigravity-ide.desktop" "false"
     safe_remove "$USER_DESKTOP_DIR/antigravity-ide-legacy.desktop" "false"
+    safe_remove "$USER_DESKTOP_DIR/antigravity-ide-2.desktop" "false"
+fi
+
+# Clean up user-local icon if no version of Antigravity remains installed
+if [ ! -d "$HOME/.local/share/antigravity-Linux" ] && \
+   [ ! -d "$HOME/.local/share/Antigravity-Linux" ] && \
+   [ ! -d "$HOME/.local/share/Antigravity-x64" ] && \
+   [ ! -d "$HOME/.local/share/antigravity-ide-Linux" ]; then
+    safe_remove "$HOME/.local/share/pixmaps/antigravity.png" "false"
 fi
 
 # Refresh user desktop database if needed
